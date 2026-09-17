@@ -1,0 +1,5 @@
+__pycache__/
+.codebase-memory/
+.env
+.env.*
+!.env.example
