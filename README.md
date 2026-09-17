@@ -41,7 +41,8 @@ bash "$HOME/CITY/city.sh" opencode
 
 ## 설치 동작
 
-- Node.js **22.23.2**, Codex **0.154.0**, OpenCode **1.18.31**을 고정 설치합니다. OCI 이미지 digest와 Node SHA-256, 최상위 npm 패키지 SHA-512를 확인합니다. npm의 추가 의존성 설치는 npm의 무결성 검증을 사용합니다.
+- Node.js **22.23.2**, Codex **0.154.0**, OpenCode **1.18.31**을 고정 설치합니다. OCI 인덱스·플랫폼 manifest·rootfs의 SHA-256과 Node SHA-256, 최상위 npm 패키지 SHA-512를 확인합니다. npm의 추가 의존성 설치는 npm의 무결성 검증을 사용합니다.
+- PRoot-Distro 5.8.0의 `image@sha256:…` 해석 문제를 피하기 위해 Python 표준 라이브러리로 검증한 rootfs를 로컬 아카이브로 설치합니다. 현재 고정한 Ubuntu·Debian의 단일 gzip 레이어만 허용하며 여러 레이어는 거부합니다. 다운로드 실패 시 설치를 시작하지 않고 임시 파일을 정리합니다.
 - `/opt/city` 아래에 에이전트별 버전을 분리합니다. 다운로드·체크섬·`--version` 검증 후 해당 에이전트의 활성 링크만 전환합니다. 재실행 시 검증된 같은 버전을 재사용합니다.
 - `install all`은 순차 설치입니다. 두 번째 설치가 실패해도 첫 번째 성공분은 유지되며 같은 명령으로 재시도할 수 있습니다. 배포판 생성 도중 중단되어 소유 표시가 없는 컨테이너는 자동으로 덮어쓰지 않습니다.
 - 업데이트는 `city.sh`의 버전·공식 digest를 갱신한 뒤 다시 설치합니다. 이전 버전 디렉터리는 자동 삭제하지 않습니다.
@@ -59,7 +60,15 @@ bash -n scripts/guest-install.sh
 
 실제 다운로드·설치·재설치·실패 시 링크 보존 검사는 **폐기 가능한 Linux 컨테이너에서만** `CITY_INTEGRATION=1 python3 tests/check.py`로 실행합니다. `/opt/city`와 테스트용 `/data/data/com.termux/files/usr`를 쓰며 apt/npm 다운로드를 수행합니다. Android 경계만 모의 처리하므로 실기기 검증을 대신하지 않습니다.
 
-2026-09-17 Linux x86_64에서 전체 9개 검사, 두 CLI의 실제 `--version`, ShellCheck와 Bash 구문 검사를 통과했습니다.
+2026-09-17 수정 후 Linux x86_64에서 전체 12개 검사, 두 CLI의 실제 `--version`, ShellCheck와 Bash 구문 검사를 통과했습니다. 실제 PRoot-Distro 5.8.0으로 Ubuntu 24.04·Debian 12의 ARM64/x64 아카이브 설치와 x64 게스트 실행도 확인했습니다. ARM64 실행과 Android 실기기 재검증은 별도입니다.
+
+실제 PRoot-Distro 검사도 실행하려면 폐기 가능한 Linux 컨테이너에 `proot`를 설치하고 공식 v5.8.0 소스를 준비한 뒤 `CITY_PROOT_SOURCE=/path/to/proot-distro python3 tests/check.py`를 실행합니다. Ubuntu·Debian의 ARM64/x64 아카이브를 다운로드·설치하고 x64 게스트 실행을 확인합니다.
+
+## 첫 설치의 `Image not found` 오류
+
+PRoot-Distro 5.8.0의 [주소 파서](https://github.com/termux/proot-distro/blob/v5.8.0/proot_distro/helpers/docker/refs.py)는 기존 `ubuntu@sha256:…` 인자를 `library/ubuntu@sha256` 저장소로 잘못 해석합니다. CITY의 첫 버전에 있던 호환성 문제입니다. 수정된 CITY 파일 전체를 기기에 반영한 후 `bash "$HOME/CITY/city.sh" install all`을 다시 실행하세요. 이번 로그처럼 이미지 조회 단계에서 실패한 경우 PRoot-Distro가 실패한 컨테이너를 정리하므로 별도 삭제는 필요하지 않습니다.
+
+전원이 끊기는 등의 이유로 `Refusing unmanaged distro`가 나오면 기존 폴더를 자동 삭제하지 않습니다. 해당 메시지와 `proot-distro list` 결과를 확인한 뒤 복구해야 합니다. 미러 경고나 업그레이드 가능한 패키지 개수는 이번 오류의 원인이 아닙니다.
 
 Termux에서 남은 확인: `install all`, 두 CLI의 `--version`, 로그인, 실제 프로젝트 작업, Ctrl+C 종료. 개발 시 새 에이전트는 `city.sh`의 패키지 정보·명령 선택과 내부 설치기의 허용 목록에 추가합니다.
 

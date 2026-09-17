@@ -71,7 +71,7 @@ if [[ "$command" == install ]]; then
         *) die 'Only 64-bit ARM and x86_64 Termux are supported.' ;;
     esac
     pkg update -y
-    pkg install -y proot-distro util-linux
+    pkg install -y proot-distro util-linux python
     pd_version="$(dpkg-query -W -f='${Version}' proot-distro)"
     dpkg --compare-versions "$pd_version" ge 5.0.0 || die 'PRoot-Distro 5 or newer is required.'
     mkdir -p "$HOME/.local/share/city"
@@ -81,9 +81,16 @@ if [[ "$command" == install ]]; then
     rootfs="$PREFIX/var/lib/proot-distro/containers/$distro/rootfs"
     owner="$rootfs/.city-owner"
     if [[ ! -e "${rootfs%/rootfs}" && ! -L "${rootfs%/rootfs}" ]]; then
-        proot-distro install --name "$distro" "$image"
+        download_dir="$(mktemp -d "$HOME/.local/share/city/rootfs.XXXXXX")"
+        trap 'rm -rf -- "$download_dir"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        python3 "$script_dir/scripts/fetch-rootfs.py" "$image" "$arch" "$download_dir/rootfs.tar.gz"
+        proot-distro install --name "$distro" "$download_dir/rootfs.tar.gz"
         [[ -d "$rootfs" && ! -L "$rootfs" ]] || die 'PRoot-Distro did not create the expected rootfs.'
         printf '%s\n' "$image" >"$owner"
+        rm -rf -- "$download_dir"
+        trap - EXIT INT TERM
     fi
     [[ -d "$rootfs" && ! -L "$rootfs" && -f "$owner" && ! -L "$owner" && "$(cat -- "$owner")" == "$image" ]] || die "Refusing unmanaged distro $distro. Choose the other CITY_DISTRO or inspect it manually."
     agents=("$selection")
