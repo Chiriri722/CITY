@@ -15,7 +15,8 @@ esac
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl xz-utils git ripgrep libstdc++6
+apt-get install -y --no-install-recommends ca-certificates curl xz-utils git ripgrep libstdc++6 \
+    python3 python-is-python3 python3-pip python3-venv python3-cryptography
 mkdir -p /opt/city
 stage="$(mktemp -d /opt/city/.install.XXXXXX)"
 trap 'rm -rf -- "$stage"' EXIT

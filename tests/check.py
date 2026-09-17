@@ -168,6 +168,24 @@ else:
         for _ in range(2):
             result = self.run_city('install', 'all', timeout=600)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            # Use the distro interpreter, not a Python preinstalled in the test image.
+            result = subprocess.run(['/usr/bin/python3', '-c',
+                                     'from cryptography.fernet import Fernet; '
+                                     'f = Fernet(Fernet.generate_key()); '
+                                     'assert f.decrypt(f.encrypt(b"city")) == b"city"'],
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(Path('/usr/bin/python').samefile('/usr/bin/python3'))
+        with tempfile.TemporaryDirectory() as directory:
+            venv = Path(directory) / 'venv'
+            for command in [
+                ['/usr/bin/python3', '-m', 'venv', str(venv)],
+                [str(venv / 'bin/python'), '-m', 'pip', 'install', '--only-binary=:all:', 'cryptography'],
+                [str(venv / 'bin/python'), '-c', 'from cryptography.fernet import Fernet; '
+                 'f = Fernet(Fernet.generate_key()); assert f.decrypt(f.encrypt(b"venv")) == b"venv"'],
+            ]:
+                result = subprocess.run(command, text=True, capture_output=True, timeout=180)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         links = {agent: Path('/opt/city', agent).readlink() for agent in ('codex', 'opencode')}
         for agent, version in [('codex', '0.154.0'), ('opencode', '1.18.31')]:
             result = subprocess.run([f'/opt/city/{agent}/bin/{agent}', '--version'],

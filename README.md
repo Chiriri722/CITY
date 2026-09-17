@@ -39,6 +39,20 @@ bash "$HOME/CITY/city.sh" opencode
 
 원하면 `~/.bashrc`에 `alias city='bash "$HOME/CITY/city.sh"'`를 추가해 `city codex`, `city opencode`로 실행할 수 있습니다.
 
+## Python 작업 환경
+
+초기 설치와 재설치 시 **게스트 배포판 내부**에 `python3`, `python-is-python3`, `python3-pip`, `python3-venv`, `python3-cryptography`를 설치합니다. 에이전트는 `/usr/bin/python3` 또는 `python`으로 작업할 수 있으며, 기본 `cryptography`는 배포판에서 관리하는 버전입니다. Termux의 Python이나 가상환경을 가져다 쓰지 않습니다.
+
+프로젝트별 패키지 또는 다른 버전이 필요하면 OpenCode/Codex의 게스트 셸에서 다음처럼 별도 환경을 만드세요. 시스템 Python에 강제 pip 설치하는 옵션은 필요하지 않습니다.
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install cryptography
+.venv/bin/python -c 'from cryptography.fernet import Fernet; print("cryptography ready")'
+```
+
+기존 설치도 수정본 전체를 반영한 뒤 `bash "$HOME/CITY2/city.sh" install opencode`를 다시 실행하면 Python 환경을 추가합니다. 폴더명이 `CITY`라면 경로를 맞춰 바꾸세요. 이후 에이전트에게 게스트 Python 또는 `.venv/bin/python`을 사용하도록 알려주면 됩니다.
+
 ## 설치 동작
 
 - Node.js **22.23.2**, Codex **0.154.0**, OpenCode **1.18.31**을 고정 설치합니다. OCI 인덱스·플랫폼 manifest·rootfs의 SHA-256과 Node SHA-256, 최상위 npm 패키지 SHA-512를 확인합니다. npm의 추가 의존성 설치는 npm의 무결성 검증을 사용합니다.
@@ -61,6 +75,8 @@ bash -n scripts/guest-install.sh
 실제 다운로드·설치·재설치·실패 시 링크 보존 검사는 **폐기 가능한 Linux 컨테이너에서만** `CITY_INTEGRATION=1 python3 tests/check.py`로 실행합니다. `/opt/city`와 테스트용 `/data/data/com.termux/files/usr`를 쓰며 apt/npm 다운로드를 수행합니다. Android 경계만 모의 처리하므로 실기기 검증을 대신하지 않습니다.
 
 2026-09-17 수정 후 Linux x86_64에서 전체 12개 검사, 두 CLI의 실제 `--version`, ShellCheck와 Bash 구문 검사를 통과했습니다. 실제 PRoot-Distro 5.8.0으로 Ubuntu 24.04·Debian 12의 ARM64/x64 아카이브 설치와 x64 게스트 실행도 확인했습니다. ARM64 실행과 Android 실기기 재검증은 별도입니다.
+
+Python 환경 보강은 Debian 12·Ubuntu 24.04의 x86_64 컨테이너에서 기본 `cryptography` 암복호화, venv 생성, pip wheel 설치 후 암복호화를 검증했습니다. 회귀 검사에도 Python 환경 확인을 추가했습니다.
 
 실제 PRoot-Distro 검사도 실행하려면 폐기 가능한 Linux 컨테이너에 `proot`를 설치하고 공식 v5.8.0 소스를 준비한 뒤 `CITY_PROOT_SOURCE=/path/to/proot-distro python3 tests/check.py`를 실행합니다. Ubuntu·Debian의 ARM64/x64 아카이브를 다운로드·설치하고 x64 게스트 실행을 확인합니다.
 
