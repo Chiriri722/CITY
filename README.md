@@ -1,6 +1,16 @@
 # CITY
 
-Termux에서 Ubuntu/Debian PRoot를 통해 CLI 코딩 에이전트를 설치하고 실행하는 Bash 도구입니다. 1차 지원 대상은 **Codex**와 **OpenCode**입니다.
+Termux에서 Ubuntu/Debian PRoot를 통해 CLI 코딩 에이전트를 설치하고 실행하는 Bash 도구입니다. **Codex, OpenCode, Antigravity CLI, Grok Build, Muse Code**를 지원합니다.
+
+| 제품 | CITY 명령 | 게스트 실행 파일 | 설치 버전 |
+| --- | --- | --- | --- |
+| Codex | `codex` | `codex` | 0.154.0 |
+| OpenCode | `opencode` | `opencode` | 1.18.31 |
+| Google Antigravity CLI | `antigravity` | `agy` | 1.3.1 |
+| xAI Grok Build | `grok` | `grok` | 1.0.46 |
+| Meta Muse Code | `muse` | `muse` | 1.4.3-R5018.1 |
+
+Antigravity는 터미널 CLI를 설치합니다. 데스크톱 IDE 설치는 포함하지 않습니다.
 
 ## 설치
 
@@ -10,7 +20,8 @@ Termux에서 Ubuntu/Debian PRoot를 통해 CLI 코딩 에이전트를 설치하�
 pkg update && pkg install git
 git clone https://github.com/Chiriri722/CITY.git "$HOME/CITY"
 cd "$HOME/CITY"
-bash city.sh install all       # 또는 codex / opencode
+bash city.sh install all       # 다섯 CLI 모두 설치
+# 하나만 설치: bash city.sh install antigravity   # 또는 codex / opencode / grok / muse
 ```
 
 로컬 작업물을 아직 원격에 push하지 않았다면 clone 대신 `CITY` 폴더 전체를 Termux의 `$HOME/CITY`로 복사합니다.
@@ -33,11 +44,36 @@ bash "$HOME/CITY/city.sh" codex login --device-auth
 bash "$HOME/CITY/city.sh" codex
 bash "$HOME/CITY/city.sh" opencode auth login
 bash "$HOME/CITY/city.sh" opencode
+bash "$HOME/CITY/city.sh" antigravity
+bash "$HOME/CITY/city.sh" grok login --device-auth
+bash "$HOME/CITY/city.sh" grok
+bash "$HOME/CITY/city.sh" muse
 ```
 
 로그인에 표시되는 URL은 Android 브라우저에서 직접 엽니다. Codex의 기기 코드 로그인은 계정/워크스페이스 설정에서 허용되어 있어야 합니다. 서비스 계정과 이용 요금은 각 공급자의 정책을 따릅니다. 호스트 환경 변수는 PRoot 게스트에 자동 전달되지 않습니다.
 
-원하면 `~/.bashrc`에 `alias city='bash "$HOME/CITY/city.sh"'`를 추가해 `city codex`, `city opencode`로 실행할 수 있습니다.
+원하면 `~/.bashrc`에 `alias city='bash "$HOME/CITY/city.sh"'`를 추가해 `city codex`, `city opencode`, `city antigravity`, `city grok`, `city muse`로 실행할 수 있습니다. 폴더명이 `CITY2`라면 모든 예제의 경로도 `CITY2`로 바꾸세요. 작업 폴더를 CITY로 고정할 필요는 없습니다.
+
+### 2차 지원 CLI의 인증
+
+- [Antigravity 공식 인증 문서](https://antigravity.google/docs/cli/install): 로컬 로그인은 브라우저와 Linux Secret Service/D-Bus를 사용하며 SSH 환경에서는 수동 URL/코드 흐름을 제공합니다. Termux PRoot에서 해당 로그인 흐름은 실기기 확인이 필요합니다. 브라우저 없는 환경에는 아래 Gemini API 키 방식을 사용할 수 있습니다.
+- [Grok Build 공식 인증 문서](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md): `grok login --device-auth`의 URL/코드를 Android 브라우저에서 사용합니다. 게스트의 `XAI_API_KEY`도 지원하며 저장된 로그인 세션이 우선합니다.
+- [Muse Code 공식 인증 문서](https://dev.meta.ai/docs/muse-code/auth): 첫 실행 또는 `/login`에서 브라우저/키 인증을 선택합니다. 키를 저장하려면 `bash "$HOME/CITY/city.sh" muse auth set --api-key-stdin`에 표준 입력으로 전달하세요. 게스트의 `META_API_KEY`는 저장된 인증보다 우선합니다.
+
+Antigravity의 API 키 모드는 `~/.gemini/antigravity-cli/settings.json`에 `"modelProvider": "gemini"` 설정과 `GEMINI_API_KEY`가 **둘 다** 필요합니다. 기존 JSON의 다른 설정은 유지해 해당 필드를 추가하세요. 공유 홈이므로 이 파일은 Termux 홈에서도 편집할 수 있습니다. 키를 셸 기록에 남기지 않고 같은 게스트 세션에서 실행하는 예:
+
+```bash
+proot-distro login --user root --isolated --shared-home "city-${CITY_DISTRO:-ubuntu}" -- /bin/bash --noprofile --norc
+# 아래부터는 게스트 셸입니다.
+export PATH="/opt/city/antigravity/bin:/opt/city/node-v22.23.2/bin:$PATH"
+cd /root/projects/demo
+read -rsp 'GEMINI_API_KEY: ' GEMINI_API_KEY; printf '\n'
+export GEMINI_API_KEY
+agy
+exit
+```
+
+키는 위 게스트 세션에만 적용됩니다. 호스트에서 `export`하거나 `.env`에 넣는 것으로 Antigravity 인증이 설정되지는 않습니다. CITY는 사용자의 로그인·API 키·승인 설정을 자동 변경하지 않습니다.
 
 ## Python 작업 환경
 
@@ -55,11 +91,14 @@ python3 -m venv .venv
 
 ## 설치 동작
 
-- Node.js **22.23.2**, Codex **0.154.0**, OpenCode **1.18.31**을 고정 설치합니다. OCI 인덱스·플랫폼 manifest·rootfs의 SHA-256과 Node SHA-256, 최상위 npm 패키지 SHA-512를 확인합니다. npm의 추가 의존성 설치는 npm의 무결성 검증을 사용합니다.
+- Node.js **22.23.2**와 위 표의 CLI 버전을 설치합니다. OCI 인덱스·플랫폼 manifest·rootfs의 SHA-256과 Node SHA-256, 최상위 npm 패키지 SHA-512를 확인합니다. Codex·OpenCode·Grok은 공식 npm 패키지를 사용하며 추가 의존성은 npm의 무결성 검증을 사용합니다.
+- Antigravity는 공식 Linux ARM64/x64 tarball과 SHA-512, Muse는 공식 Linux ARM64/x64 단일 바이너리와 SHA-256을 사용합니다. 배포 스크립트의 셸 프로필 수정 단계는 실행하지 않습니다. 두 CLI도 기존 에이전트와 같은 임시 설치·실행 확인·활성 링크 전환 절차를 거칩니다.
 - PRoot-Distro 5.8.0의 `image@sha256:…` 해석 문제를 피하기 위해 Python 표준 라이브러리로 검증한 rootfs를 로컬 아카이브로 설치합니다. 현재 고정한 Ubuntu·Debian의 단일 gzip 레이어만 허용하며 여러 레이어는 거부합니다. 다운로드 실패 시 설치를 시작하지 않고 임시 파일을 정리합니다.
 - `/opt/city` 아래에 에이전트별 버전을 분리합니다. 다운로드·체크섬·`--version` 검증 후 해당 에이전트의 활성 링크만 전환합니다. 재실행 시 검증된 같은 버전을 재사용합니다.
-- `install all`은 순차 설치입니다. 두 번째 설치가 실패해도 첫 번째 성공분은 유지되며 같은 명령으로 재시도할 수 있습니다. 배포판 생성 도중 중단되어 소유 표시가 없는 컨테이너는 자동으로 덮어쓰지 않습니다.
-- 업데이트는 `city.sh`의 버전·공식 digest를 갱신한 뒤 다시 설치합니다. 이전 버전 디렉터리는 자동 삭제하지 않습니다.
+- `install all`은 Codex → OpenCode → Antigravity → Grok → Muse 순서입니다. 중간에 실패해도 앞선 성공분은 유지되며 같은 명령으로 재시도할 수 있습니다. 배포판 생성 도중 중단되어 소유 표시가 없는 컨테이너는 자동으로 덮어쓰지 않습니다.
+- CITY 설치 버전 업데이트는 `city.sh`의 버전·공식 URL·digest를 갱신하고 내부 설치기의 허용 URL과 맞춘 뒤 다시 설치합니다. 이전 버전 디렉터리는 자동 삭제하지 않습니다. 이는 CITY가 설치하는 배포물의 고정이며, CLI 자체의 업데이트 기능을 잠그는 설정은 아닙니다.
+
+2차 배포물 출처(2026-10-08 확인): [Antigravity 공식 설치 스크립트](https://antigravity.google/cli/install.sh)와 [ARM64 manifest](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_arm64.json) / [x64 manifest](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json), [Grok 공식 npm 배포 정보](https://registry.npmjs.org/@xai-official/grok/1.0.46), [Muse 공식 설치 스크립트](https://dev.meta.ai/install.sh)와 [stable 채널](https://api.meta.ai/muse-code/channels/muse-stable). 채널의 최신 버전이 달라져도 CITY는 코드에 기록된 URL과 체크섬으로 설치합니다.
 
 PRoot는 보안 격리용 가상 머신이 아닙니다. 에이전트는 공유된 홈에 접근할 수 있으며 Android 커널에 따라 샌드박스·서브프로세스 기능이 제한될 수 있습니다. CITY는 에이전트의 승인·샌드박스 설정을 자동 해제하지 않습니다. 공유 저장소(`/sdcard` 등)는 지원하지 않습니다.
 
@@ -78,6 +117,16 @@ bash -n scripts/guest-install.sh
 
 Python 환경 보강은 Debian 12·Ubuntu 24.04의 x86_64 컨테이너에서 기본 `cryptography` 암복호화, venv 생성, pip wheel 설치 후 암복호화를 검증했습니다. 회귀 검사에도 Python 환경 확인을 추가했습니다.
 
+2026-10-08 2차 지원 검증:
+
+- Debian 12 x64: 14개 중 13개 검사 통과, 기존 실제 PRoot-Distro 이미지 검사는 환경 변수 미설정으로 1개 생략. ShellCheck 통과.
+- Debian 12·Ubuntu 24.04 x64: 다섯 CLI의 실제 설치·재설치와 **CITY 실행 경로를 통한** `--version`, 기존 Python/venv/cryptography 검사 통과.
+- Antigravity·Grok·Muse ARM64: 코드에 지정한 공식 배포물의 체크섬 및 ELF 아키텍처 확인, QEMU에서 각각 `--version` 통과. Android 실기기나 ARM64 전체 설치 검증과는 구분합니다.
+- Antigravity·Grok·Muse x64: Debian의 실제 PRoot 5.1.0 안에서도 `--version` 통과. Termux의 PRoot-Distro 전체 실행 환경을 재현한 검사는 아닙니다.
+- 네트워크 없는 회귀 검사: 새 명령 전달, ARM64/x64 네이티브 설치 경로, 재설치·업그레이드, 체크섬 오류·기동 실패 시 기존 활성 링크 보존, 임시 파일 정리 확인.
+
+인증된 모델 요청·Android 터미널 UI·실제 프로젝트 도구 실행은 기기에서 확인해야 합니다. 설치 검증 과정에서 로그인하거나 유료 모델 요청을 보내지는 않습니다.
+
 실제 PRoot-Distro 검사도 실행하려면 폐기 가능한 Linux 컨테이너에 `proot`를 설치하고 공식 v5.8.0 소스를 준비한 뒤 `CITY_PROOT_SOURCE=/path/to/proot-distro python3 tests/check.py`를 실행합니다. Ubuntu·Debian의 ARM64/x64 아카이브를 다운로드·설치하고 x64 게스트 실행을 확인합니다.
 
 ## 첫 설치의 `Image not found` 오류
@@ -86,7 +135,7 @@ PRoot-Distro 5.8.0의 [주소 파서](https://github.com/termux/proot-distro/blo
 
 전원이 끊기는 등의 이유로 `Refusing unmanaged distro`가 나오면 기존 폴더를 자동 삭제하지 않습니다. 해당 메시지와 `proot-distro list` 결과를 확인한 뒤 복구해야 합니다. 미러 경고나 업그레이드 가능한 패키지 개수는 이번 오류의 원인이 아닙니다.
 
-Termux에서 남은 확인: `install all`, 두 CLI의 `--version`, 로그인, 실제 프로젝트 작업, Ctrl+C 종료. 개발 시 새 에이전트는 `city.sh`의 패키지 정보·명령 선택과 내부 설치기의 허용 목록에 추가합니다.
+Termux에서 남은 확인: `install all`, 다섯 CLI의 `--version`, 로그인, 실제 프로젝트 작업, Ctrl+C 종료. 개발 시 새 에이전트는 `city.sh`의 패키지 정보·명령 선택과 내부 설치기의 허용 목록에 추가합니다.
 
 기존 [FreeBuff Termux](https://github.com/Chiriri722/Freebuff_In_Termux)의 PRoot 설치·홈 매핑 방식을 범용화했습니다. MIT 라이선스입니다.
 

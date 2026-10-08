@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -43,7 +44,7 @@ sys.exit(int(os.environ.get('CITY_MOCK_STATUS', '0')))
         self.env.pop('PREFIX')
         result = self.run_city('--help')
         self.assertEqual(result.returncode, 0, result.stderr)
-        for name in ('codex', 'opencode', 'install'):
+        for name in ('codex', 'opencode', 'antigravity', 'grok', 'muse', 'install'):
             self.assertIn(name, result.stdout)
         self.assertFalse(self.log.exists())
 
@@ -108,6 +109,16 @@ sys.exit(int(os.environ.get('CITY_MOCK_STATUS', '0')))
         self.assertIn('city-debian', call)
         self.assertIn('/opt/city/opencode/bin/opencode', call)
 
+    def test_phase_two_dispatch(self):
+        for agent, binary in [('antigravity', 'agy'), ('grok', 'grok'), ('muse', 'muse')]:
+            with self.subTest(agent=agent):
+                result = self.run_city(agent, '--version')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                call = json.loads(self.log.read_text().splitlines()[-1])
+                self.assertIn(f'/opt/city/{agent}/bin/{binary}', call)
+                self.assertEqual(call[-1], '--version')
+                self.assertIn('--isolated', call)
+
     def test_outside_home_rejected(self):
         self.env['HOME'] = str(self.home / 'nested')
         Path(self.env['HOME']).mkdir()
@@ -144,7 +155,7 @@ class InstallIntegration(unittest.TestCase):
     setUp = CityCLI.setUp
     run_city = CityCLI.run_city
 
-    def test_install_both_repeat_and_integrity_failure(self):
+    def test_install_all_repeat_and_integrity_failure(self):
         # Mock only the Android package/container boundary; execute the real guest installer.
         for name, body in {
             'pkg': 'exit 0',
@@ -166,7 +177,7 @@ else:
     os.execv(cmd[0], cmd)
 ''')
         for _ in range(2):
-            result = self.run_city('install', 'all', timeout=600)
+            result = self.run_city('install', 'all', timeout=1200)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             # Use the distro interpreter, not a Python preinstalled in the test image.
             result = subprocess.run(['/usr/bin/python3', '-c',
@@ -186,12 +197,16 @@ else:
             ]:
                 result = subprocess.run(command, text=True, capture_output=True, timeout=180)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        links = {agent: Path('/opt/city', agent).readlink() for agent in ('codex', 'opencode')}
-        for agent, version in [('codex', '0.154.0'), ('opencode', '1.18.31')]:
-            result = subprocess.run([f'/opt/city/{agent}/bin/{agent}', '--version'],
-                                    text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(version, result.stdout)
+        releases = [('codex', 'codex', '0.154.0'), ('opencode', 'opencode', '1.18.31'),
+                    ('antigravity', 'agy', '1.3.1'), ('grok', 'grok', '1.0.46'),
+                    ('muse', 'muse', '1.4.3-R5018.1')]
+        links = {agent: Path('/opt/city', agent).readlink() for agent, _, _ in releases}
+        for agent, binary, version in releases:
+            with self.subTest(agent=agent):
+                self.assertTrue(Path(f'/opt/city/{agent}/bin/{binary}').is_file())
+                result = self.run_city(agent, '--version', timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(version, result.stdout)
         source = (ROOT / 'city.sh').read_text()
         node_version = re.search(r'node_version=(v[\d.]+)', source)[1]
         node_sha = re.findall(r'node_sha=([a-f0-9]{64})', source)[1]
@@ -202,6 +217,85 @@ else:
                                 text=True, capture_output=True, timeout=120)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(links, {agent: Path('/opt/city', agent).readlink() for agent in links})
+
+
+class NativeInstaller(unittest.TestCase):
+    def test_native_integrity_startup_and_atomic_upgrade(self):
+        # Redirect only the install root and network/package boundaries. Run the real
+        # checksum, extraction, startup, marker and atomic-link logic in a temp directory.
+        for agent, binary in [('antigravity', 'agy'), ('muse', 'muse')]:
+            for arch in ('arm64', 'x64'):
+                with self.subTest(agent=agent, arch=arch), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    city = root / 'city'
+                    node = city / 'node-v1.0.0'
+                    node.mkdir(parents=True)
+                    (node / '.city-sha256').write_text('1' * 64 + '\n')
+                    mocks = node / 'bin'
+                    mocks.mkdir()
+                    payload = root / 'download'
+                    for name, body in [('apt-get', 'exit 0'),
+                                       ('curl', 'cp -- "$CITY_TEST_PAYLOAD" "${@: -1}"')]:
+                        path = mocks / name
+                        path.write_text('#!/bin/bash\n' + body + '\n')
+                        path.chmod(0o755)
+                    installer = root / 'install.sh'
+                    installer.write_text((ROOT / 'scripts/guest-install.sh').read_text().replace(
+                        '/opt/city', str(city)))
+                    env = dict(os.environ, PATH=f'{mocks}:{os.environ["PATH"]}',
+                               CITY_TEST_PAYLOAD=str(payload))
+                    algorithm = 'sha256' if agent == 'muse' else 'sha512'
+
+                    def build_payload(status=0):
+                        content = f'#!/bin/sh\necho native-test\nexit {status}\n'.encode()
+                        if agent == 'antigravity':
+                            with tarfile.open(payload, 'w:gz') as archive:
+                                entry = tarfile.TarInfo('antigravity')
+                                entry.size = len(content)
+                                entry.mode = 0o755
+                                archive.addfile(entry, io.BytesIO(content))
+                        else:
+                            payload.write_bytes(content)
+                        return hashlib.new(algorithm, payload.read_bytes()).hexdigest()
+
+                    def arguments(major, digest):
+                        version = f'{major}.0.0' + ('-R1.1' if agent == 'muse' else '')
+                        if agent == 'muse':
+                            platform = 'aarch64' if arch == 'arm64' else 'x86'
+                            url = ('https://lookaside.facebook.com/lookaside/muse/download/'
+                                   f'?channel=muse&version={version}&file=muse-{platform}-linux')
+                        else:
+                            platform = 'linux-arm' if arch == 'arm64' else 'linux-x64'
+                            url = ('https://storage.googleapis.com/antigravity-public/antigravity-cli/'
+                                   f'{version}-4582356770750464/{platform}/cli_linux_{arch}.tar.gz')
+                        return [agent, version, url, digest, 'v1.0.0', arch, '1' * 64]
+
+                    def run(args):
+                        return subprocess.run(['bash', str(installer), *args], env=env,
+                                              text=True, capture_output=True, timeout=20)
+
+                    digest = build_payload()
+                    first = arguments(1, digest)
+                    for _ in range(2):
+                        result = run(first)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    link = city / agent
+                    original = link.readlink()
+                    self.assertTrue((link / 'bin' / binary).is_file())
+                    bad = arguments(2, '0' * len(digest))
+                    self.assertNotEqual(run(bad).returncode, 0)
+                    self.assertEqual(link.readlink(), original)
+                    bad = arguments(2, build_payload(status=71))
+                    self.assertEqual(run(bad).returncode, 71)
+                    self.assertEqual(link.readlink(), original)
+                    self.assertFalse((city / f'{agent}-{bad[1]}').exists())
+                    good = arguments(2, build_payload())
+                    self.assertEqual(run(good).returncode, 0)
+                    self.assertNotEqual(link.readlink(), original)
+                    self.assertTrue(original.is_dir(), 'Keep the previous version')
+                    good[2] += '&unexpected=1'
+                    self.assertNotEqual(run(good).returncode, 0)
+                    self.assertFalse(list(city.glob('.install.*')), 'Clean failed stages')
 
 
 class RootfsIntegrity(unittest.TestCase):

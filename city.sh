@@ -7,18 +7,22 @@ die() { printf 'city: %s\n' "$*" >&2; exit 2; }
 usage() {
     cat <<'HELP'
 CITY — coding agents in Termux via PRoot
-  bash city.sh install <codex|opencode|all>
+  bash city.sh install <codex|opencode|antigravity|grok|muse|all>
   bash city.sh codex [arguments...]
   bash city.sh opencode [arguments...]
+  bash city.sh antigravity [arguments...]   (agy)
+  bash city.sh grok [arguments...]          (Grok Build)
+  bash city.sh muse [arguments...]          (Muse Code)
   bash city.sh --help
 Set CITY_DISTRO=ubuntu (default) or debian for every command.
 Run agents from a project beneath your Termux HOME.
 HELP
 }
 
-# Pin each agent's official npm tarball. Add future agents here and to dispatch.
+# Pin official releases. The optional architecture is needed only at install time.
 agent_info() {
     agent="$1"
+    binary="$agent"
     case "$agent" in
         codex)
             version=0.154.0
@@ -30,6 +34,32 @@ agent_info() {
             url="https://registry.npmjs.org/opencode-ai/-/opencode-ai-${version}.tgz"
             digest=27de5f79e7de5b0b486b0de2af1efa5a3cd6720417c66b8798356986fb397a9f57df47c127a4fa6c5870e748bd2b1e74306ff13e7e70da969f5c87cdb5daf2f7
             ;;
+        antigravity)
+            binary=agy
+            version=1.3.1
+            if [[ "${2:-x64}" == arm64 ]]; then
+                url="https://storage.googleapis.com/antigravity-public/antigravity-cli/$version-4582356770750464/linux-arm/cli_linux_arm64.tar.gz"
+                digest=c41b8cd8c526eb043fa0b019377ab8109190b547624f17f5255868ace79cd8e9195a60ac7b89478101127effbe049341c4108ed0ead4b160968704a8b79d8799
+            else
+                url="https://storage.googleapis.com/antigravity-public/antigravity-cli/$version-4582356770750464/linux-x64/cli_linux_x64.tar.gz"
+                digest=3b8349d72678795baf8788481815e20d7acf3b80f9d2f867a607e712bc6be7fb18fd7d4fcf3aeee4ae593b0f469684c6d3497524f10a4c426a1a2bdec20b1f68
+            fi
+            ;;
+        grok)
+            version=1.0.46
+            url="https://registry.npmjs.org/@xai-official/grok/-/grok-$version.tgz"
+            digest=a973b89b224501008864d8cc25601a2744d35208b65ab4299d862dadd77d850f1361eccf1f4b25487058831a9e765c2070755da818a20d750b1e421d043ce4c9
+            ;;
+        muse)
+            version=1.4.3-R5018.1
+            if [[ "${2:-x64}" == arm64 ]]; then
+                url="https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=$version&file=muse-aarch64-linux"
+                digest=6426c76a0081f20d60f6cad03308a147d79ce45758f1a89fd2713253cf475497
+            else
+                url="https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=$version&file=muse-x86-linux"
+                digest=e671790882bc88d65edb4ae0f713becf378ebf91011034ab75abebe3592dde4f
+            fi
+            ;;
         *) die "Unsupported agent: $agent" ;;
     esac
 }
@@ -38,11 +68,11 @@ command="${1:---help}"
 case "$command" in
     --help | -h | help) usage; exit 0 ;;
     install)
-        [[ $# == 2 ]] || die 'Usage: bash city.sh install <codex|opencode|all>'
+        [[ $# == 2 ]] || die 'Usage: bash city.sh install <codex|opencode|antigravity|grok|muse|all>'
         selection="$2"
         [[ "$selection" == all ]] || agent_info "$selection"
         ;;
-    codex | opencode) agent_info "$command"; shift ;;
+    codex | opencode | antigravity | grok | muse) agent_info "$command"; shift ;;
     *) die "Unknown command: $command" ;;
 esac
 
@@ -94,14 +124,14 @@ if [[ "$command" == install ]]; then
     fi
     [[ -d "$rootfs" && ! -L "$rootfs" && -f "$owner" && ! -L "$owner" && "$(cat -- "$owner")" == "$image" ]] || die "Refusing unmanaged distro $distro. Choose the other CITY_DISTRO or inspect it manually."
     agents=("$selection")
-    [[ "$selection" != all ]] || agents=(codex opencode)
+    [[ "$selection" != all ]] || agents=(codex opencode antigravity grok muse)
     for item in "${agents[@]}"; do
-        agent_info "$item"
+        agent_info "$item" "$arch"
         "${login[@]}" "$distro" -- /bin/bash -s -- \
             "$agent" "$version" "$url" "$digest" "$node_version" "$arch" "$node_sha" \
             <"$script_dir/scripts/guest-install.sh"
     done
-    printf 'Installed in %s. Run: bash city.sh <codex|opencode>\n' "$distro"
+    printf 'Installed in %s. Run: bash city.sh <codex|opencode|antigravity|grok|muse>\n' "$distro"
     exit 0
 fi
 
@@ -116,10 +146,10 @@ esac
 # shellcheck disable=SC2016 # Expansion happens in the guest shell.
 exec "${login[@]}" --shared-home "$distro" -- /bin/bash --noprofile --norc -c '
     set -eu
-    export PATH="/opt/city/node-$1/bin:/opt/city/codex/bin:/opt/city/opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    export PATH="/opt/city/node-$1/bin:/opt/city/codex/bin:/opt/city/opencode/bin:/opt/city/antigravity/bin:/opt/city/grok/bin:/opt/city/muse/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     cd -- "$2" || exit 2
     binary="$3"
     shift 3
     test -x "$binary" || { echo "city: agent missing; run install first." >&2; exit 2; }
     exec "$binary" "$@"
-' city "$node_version" "$guest_cwd" "/opt/city/$agent/bin/$agent" "$@"
+' city "$node_version" "$guest_cwd" "/opt/city/$agent/bin/$binary" "$@"
