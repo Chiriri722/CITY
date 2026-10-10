@@ -6,6 +6,7 @@ import io
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -24,7 +25,8 @@ class CityCLI(unittest.TestCase):
         self.bin.mkdir()
         self.log = self.home / 'calls.jsonl'
         self.env = dict(os.environ, HOME=str(self.home), PREFIX='/data/data/com.termux/files/usr',
-                        PATH=f'{self.bin}:{os.environ["PATH"]}', CITY_CALLS=str(self.log))
+                        PATH=f'{self.bin}:{os.environ["PATH"]}', CITY_CALLS=str(self.log),
+                        CITY_DISTRO='ubuntu')
         mock = self.bin / 'proot-distro'
         mock.write_text('''#!/usr/bin/env python3
 import json, os, sys
@@ -49,7 +51,8 @@ sys.exit(int(os.environ.get('CITY_MOCK_STATUS', '0')))
         self.assertFalse(self.log.exists())
 
     def test_invalid_input_has_no_side_effects(self):
-        for args in [('install', '../bad'), ('install', 'codex', 'extra'), ('unknown',)]:
+        for args in [('install', '../bad'), ('install', 'codex', 'extra'), ('unknown',),
+                     ('status', 'extra'), ('update', '../bad'), ('update', 'all', 'extra')]:
             self.assertEqual(self.run_city(*args).returncode, 2)
         self.env['CITY_DISTRO'] = '../../escape'
         self.assertEqual(self.run_city('codex').returncode, 2)
@@ -149,14 +152,194 @@ sys.exit(int(os.environ.get('CITY_MOCK_STATUS', '0')))
         self.assertFalse(marker.exists())
 
 
+class EnvironmentReuse(unittest.TestCase):
+    def setUp(self):
+        CityCLI.setUp(self)
+        self.checkout = self.home / 'CITY3'
+        self.checkout.mkdir()
+        shutil.copytree(ROOT / 'scripts', self.checkout / 'scripts')
+        self.containers = self.home / 'containers'
+        self.script = self.checkout / 'city.sh'
+        self.script.write_text((ROOT / 'city.sh').read_text().replace(
+            '$PREFIX/var/lib/proot-distro/containers', str(self.containers)))
+        self.rootfs = self.containers / 'city-ubuntu/rootfs'
+        self.origin = 'ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517'
+        for name, body in {
+            'dpkg': 'if [[ "$1" == --print-architecture ]]; then echo amd64; else /usr/bin/dpkg "$@"; fi',
+            'dpkg-query': 'echo 5.8.0',
+            'pkg': 'echo unexpected-package-write >> "$HOME/effects"; exit 0',
+        }.items():
+            path = self.bin / name
+            path.write_text('#!/bin/bash\n' + body + '\n')
+            path.chmod(0o755)
+
+    def run_city(self, *args, **kwargs):
+        return subprocess.run(['bash', str(self.script), *args], cwd=self.home,
+                              env=self.env, text=True, capture_output=True, **kwargs)
+
+    def make_environment(self):
+        (self.rootfs / 'etc').mkdir(parents=True)
+        (self.rootfs / 'etc/os-release').write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+        (self.rootfs / 'usr/bin').mkdir(parents=True)
+        header = b'\x7fELF\x02\x01' + b'\x00' * 12 + b'\x3e\x00'
+        (self.rootfs / 'usr/bin/bash').write_bytes(header)
+        (self.rootfs / '.city-owner').write_text(self.origin + '\n')
+
+    def make_agent(self, name='opencode', version='1.18.31'):
+        target = self.rootfs / f'opt/city/{name}-{version}'
+        (target / 'bin').mkdir(parents=True)
+        binary = target / 'bin' / ('agy' if name == 'antigravity' else name)
+        binary.write_text('#!/bin/sh\necho should-not-execute >> "$HOME/effects"\n')
+        binary.chmod(0o755)
+        (target / '.city-sha512').write_text('1' * 128 + '\n')
+        (target.parent / name).symlink_to(f'/opt/city/{name}-{version}')
+
+    def test_status_missing_and_legacy_is_read_only(self):
+        result = self.run_city('status')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('missing', result.stdout)
+        self.assertFalse(self.containers.exists())
+        self.make_environment()
+        self.make_agent()
+        result = self.run_city('status')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for value in ('CITY3', 'city-ubuntu', 'legacy', 'opencode', '1.18.31'):
+            self.assertIn(value, result.stdout)
+        self.assertEqual((self.rootfs / '.city-owner').read_text(), self.origin + '\n')
+        self.assertFalse(self.log.exists())
+        self.assertFalse((self.home / 'effects').exists())
+        self.assertFalse((self.home / '.local').exists())
+
+    def test_update_requires_existing_environment_and_agent(self):
+        result = self.run_city('update')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('install', result.stderr)
+        self.assertFalse(self.containers.exists())
+        self.make_environment()
+        result = self.run_city('update', 'muse')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('install muse', result.stderr)
+        self.assertFalse(self.log.exists())
+        self.assertFalse((self.home / 'effects').exists())
+
+    def test_update_migrates_once_and_preserves_data(self):
+        self.make_environment()
+        self.make_agent()
+        (self.home / 'project.txt').write_text('keep project')
+        (self.rootfs / 'private.txt').write_text('keep guest')
+        (self.containers / 'ubuntu').mkdir()
+        (self.containers / 'ubuntu/keep').write_text('other distro')
+        before = (self.rootfs / 'private.txt').stat().st_ino
+        for args in [('update',), ('update', 'all'), ('update', 'opencode')]:
+            result = self.run_city(*args)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        owner = (self.rootfs / '.city-owner').read_text()
+        self.assertEqual(owner.splitlines(), ['CITY_ENV_V1', 'ubuntu', '24.04', 'x64', self.origin])
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(call[0] == 'login' and call[-7] == 'opencode' for call in calls))
+        self.assertEqual((self.rootfs / 'private.txt').stat().st_ino, before)
+        self.assertEqual((self.home / 'project.txt').read_text(), 'keep project')
+        self.assertEqual((self.containers / 'ubuntu/keep').read_text(), 'other distro')
+        self.assertFalse((self.home / 'effects').exists())
+        self.assertEqual(sorted(p.name for p in self.containers.iterdir()), ['city-ubuntu', 'ubuntu'])
+
+    def test_future_image_pin_keeps_known_environment(self):
+        self.make_environment()
+        self.make_agent()
+        self.script.write_text(self.script.read_text().replace('image=' + self.origin,
+                                                              'image=ubuntu@sha256:' + '2' * 64, 1))
+        result = self.run_city('update')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.rootfs / '.city-owner').read_text().splitlines()[-1], self.origin)
+
+    def test_debian_legacy_and_arm64_metadata(self):
+        self.rootfs = self.containers / 'city-debian/rootfs'
+        self.origin = 'debian@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241'
+        self.env['CITY_DISTRO'] = 'debian'
+        self.make_environment()
+        self.make_agent()
+        (self.rootfs / 'etc/os-release').write_text('ID=debian\nVERSION_ID="12"\n')
+        (self.rootfs / 'usr/bin/bash').write_bytes(b'\x7fELF\x02\x01' + b'\0' * 12 + b'\xb7\0')
+        (self.bin / 'dpkg').write_text('#!/bin/bash\nif [[ "$1" == --print-architecture ]]; then echo aarch64; else /usr/bin/dpkg "$@"; fi\n')
+        self.script.write_text(self.script.read_text().replace('image=' + self.origin,
+                                                              'image=debian@sha256:' + '2' * 64, 1))
+        result = self.run_city('update')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        owner = (self.rootfs / '.city-owner').read_text()
+        self.assertEqual(owner.splitlines(), ['CITY_ENV_V1', 'debian', '12', 'arm64', self.origin])
+        result = self.run_city('status')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Environment: managed', result.stdout)
+        self.assertEqual((self.rootfs / '.city-owner').read_text(), owner)
+
+    def test_checkouts_share_one_environment(self):
+        self.make_environment()
+        for name in ('CITY', 'CITY2', 'CITY3'):
+            checkout = self.home / name
+            if checkout != self.checkout:
+                shutil.copytree(self.checkout, checkout)
+            self.script = checkout / 'city.sh'
+            result = self.run_city('status')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f'Rootfs: {self.rootfs}', result.stdout)
+        self.assertEqual(len(list(self.containers.iterdir())), 1)
+        result = self.run_city('update')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('no installed agents', result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_invalid_agent_link_and_owner_symlink_fail_closed(self):
+        self.make_environment()
+        self.make_agent()
+        link = self.rootfs / 'opt/city/opencode'
+        link.unlink()
+        link.symlink_to('/tmp/unmanaged')
+        for command in ('status', 'update'):
+            self.assertEqual(self.run_city(command).returncode, 2)
+        self.assertFalse(self.log.exists())
+        owner = self.rootfs / '.city-owner'
+        owner.unlink()
+        other = self.home / 'unrelated-file'
+        other.write_text(self.origin + '\n')
+        owner.symlink_to(other)
+        self.assertEqual(self.run_city('update').returncode, 2)
+        self.assertEqual(other.read_text(), self.origin + '\n')
+        self.assertFalse(self.log.exists())
+
+    def test_unknown_or_incompatible_environment_is_not_modified(self):
+        self.make_environment()
+        self.make_agent()
+        owner = self.rootfs / '.city-owner'
+        for value in ('ubuntu@sha256:' + 'f' * 64, 'CITY_ENV_V9', ''):
+            owner.write_text(value + '\n')
+            self.assertEqual(self.run_city('update').returncode, 2)
+            self.assertEqual(owner.read_text(), value + '\n')
+        owner.write_text(self.origin + '\n')
+        (self.rootfs / 'etc/os-release').write_text('ID=debian\nVERSION_ID="12"\n')
+        self.assertEqual(self.run_city('update').returncode, 2)
+        (self.rootfs / 'etc/os-release').write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+        (self.rootfs / 'usr/bin/bash').write_bytes(b'\x7fELF\x02\x01' + b'\0' * 12 + b'\xb7\0')
+        self.assertEqual(self.run_city('update').returncode, 2)
+        self.assertFalse(self.log.exists())
+        self.assertFalse((self.home / 'effects').exists())
+
+
 @unittest.skipUnless(os.environ.get('CITY_INTEGRATION') == '1',
                      'Set CITY_INTEGRATION=1 only in a disposable Linux container (network required).')
 class InstallIntegration(unittest.TestCase):
     setUp = CityCLI.setUp
     run_city = CityCLI.run_city
 
+    def run_guest(self, *command, **kwargs):
+        return subprocess.run(['proot-distro', 'login', '--shared-home',
+                               'city-' + self.env.get('CITY_DISTRO', 'ubuntu'), '--', *command],
+                              env=self.env, text=True, capture_output=True, **kwargs)
+
     def test_install_all_repeat_and_integrity_failure(self):
-        # Mock only the Android package/container boundary; execute the real guest installer.
+        # Emulate the Android CLI boundary, but install and execute inside a real PRoot.
+        self.env['PREFIX'] = '/data/data/com.termux.citycheck' + self.home.name + '/files/usr'
+        self.env['CITY_DISTRO'] = os.environ.get('CITY_DISTRO', 'ubuntu')
         for name, body in {
             'pkg': 'exit 0',
             'dpkg-query': 'echo 5.0.0',
@@ -166,57 +349,73 @@ class InstallIntegration(unittest.TestCase):
             path.write_text('#!/bin/bash\n' + body + '\n')
             path.chmod(0o755)
         (self.bin / 'proot-distro').write_text('''#!/usr/bin/env python3
-import os, sys
+import json, os, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
+with open(os.environ['CITY_CALLS'], 'a') as log:
+    log.write(json.dumps(args) + '\\n')
 if args[0] == 'install':
     root = Path(os.environ['PREFIX']) / 'var/lib/proot-distro/containers' / args[2] / 'rootfs'
     root.mkdir(parents=True)
+    subprocess.run(['tar', '-xzf', args[3], '-C', str(root)], check=True)
 else:
+    name = args[args.index('--') - 1]
+    root = Path(os.environ['PREFIX']) / 'var/lib/proot-distro/containers' / name / 'rootfs'
     cmd = args[args.index('--') + 1:]
-    os.execv(cmd[0], cmd)
+    proot = ['proot', '-0', '-r', str(root), '-b', '/dev', '-b', '/proc', '-b', '/sys',
+             '-b', '/etc/resolv.conf', '-w', '/root']
+    if '--shared-home' in args:
+        proot += ['-b', os.environ['HOME'] + ':/root']
+    os.execvp('proot', proot + cmd)
 ''')
-        for _ in range(2):
-            result = self.run_city('install', 'all', timeout=1200)
+        rootfs = Path(self.env['PREFIX'], 'var/lib/proot-distro/containers',
+                      'city-' + self.env.get('CITY_DISTRO', 'ubuntu'), 'rootfs')
+        (self.home / 'project.txt').write_text('preserve this project')
+        for operation in [('install', 'all'), ('update',), ('update', 'all')]:
+            result = self.run_city(*operation, timeout=1800)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             # Use the distro interpreter, not a Python preinstalled in the test image.
-            result = subprocess.run(['/usr/bin/python3', '-c',
+            result = self.run_guest('/usr/bin/python3', '-c',
                                      'from cryptography.fernet import Fernet; '
                                      'f = Fernet(Fernet.generate_key()); '
-                                     'assert f.decrypt(f.encrypt(b"city")) == b"city"'],
-                                    text=True, capture_output=True)
+                                     'assert f.decrypt(f.encrypt(b"city")) == b"city"')
             self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(Path('/usr/bin/python').samefile('/usr/bin/python3'))
-        with tempfile.TemporaryDirectory() as directory:
-            venv = Path(directory) / 'venv'
-            for command in [
-                ['/usr/bin/python3', '-m', 'venv', str(venv)],
-                [str(venv / 'bin/python'), '-m', 'pip', 'install', '--only-binary=:all:', 'cryptography'],
-                [str(venv / 'bin/python'), '-c', 'from cryptography.fernet import Fernet; '
-                 'f = Fernet(Fernet.generate_key()); assert f.decrypt(f.encrypt(b"venv")) == b"venv"'],
-            ]:
-                result = subprocess.run(command, text=True, capture_output=True, timeout=180)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_guest('/usr/bin/python', '-c',
+                                'import os; assert os.path.samefile("/usr/bin/python", "/usr/bin/python3")')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for command in [
+            ['/usr/bin/python3', '-m', 'venv', '/root/test-venv'],
+            ['/root/test-venv/bin/python', '-m', 'pip', 'install', '--only-binary=:all:', 'cryptography'],
+            ['/root/test-venv/bin/python', '-c', 'from cryptography.fernet import Fernet; '
+             'f = Fernet(Fernet.generate_key()); assert f.decrypt(f.encrypt(b"venv")) == b"venv"'],
+        ]:
+            result = self.run_guest(*command, timeout=180)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         releases = [('codex', 'codex', '0.154.0'), ('opencode', 'opencode', '1.18.31'),
                     ('antigravity', 'agy', '1.3.1'), ('grok', 'grok', '1.0.46'),
                     ('muse', 'muse', '1.4.3-R5018.1')]
-        links = {agent: Path('/opt/city', agent).readlink() for agent, _, _ in releases}
+        links = {agent: (rootfs / 'opt/city' / agent).readlink() for agent, _, _ in releases}
         for agent, binary, version in releases:
             with self.subTest(agent=agent):
-                self.assertTrue(Path(f'/opt/city/{agent}/bin/{binary}').is_file())
+                self.assertTrue((rootfs / str(links[agent]).lstrip('/') / 'bin' / binary).is_file())
                 result = self.run_city(agent, '--version', timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(version, result.stdout)
         source = (ROOT / 'city.sh').read_text()
         node_version = re.search(r'node_version=(v[\d.]+)', source)[1]
         node_sha = re.findall(r'node_sha=([a-f0-9]{64})', source)[1]
-        result = subprocess.run(['bash', str(ROOT / 'scripts/guest-install.sh'),
-                                 'codex', '0.154.0',
+        result = self.run_guest('bash', '-s', '--', 'codex', '0.154.0',
                                  'https://registry.npmjs.org/@openai/codex/-/codex-0.154.0.tgz',
-                                 '0' * 128, node_version, 'x64', node_sha],
-                                text=True, capture_output=True, timeout=120)
+                                 '0' * 128, node_version, 'x64', node_sha,
+                                 input=(ROOT / 'scripts/guest-install.sh').read_text(), timeout=120)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(links, {agent: Path('/opt/city', agent).readlink() for agent in links})
+        self.assertEqual(links, {agent: (rootfs / 'opt/city' / agent).readlink() for agent in links})
+        result = self.run_city('status')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Environment: managed', result.stdout)
+        self.assertEqual((self.home / 'project.txt').read_text(), 'preserve this project')
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual(sum(call[0] == 'install' for call in calls), 1)
 
 
 class NativeInstaller(unittest.TestCase):
