@@ -4,87 +4,58 @@ set -euo pipefail
 umask 077
 
 die() { printf 'city: %s\n' "$*" >&2; exit 2; }
+script_dir="$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")"
+[[ -r "$script_dir/scripts/agents.sh" ]] || die 'Missing scripts; keep the CITY checkout together.'
+# shellcheck source=scripts/agents.sh
+source "$script_dir/scripts/agents.sh"
+
 usage() {
-    cat <<'HELP'
+    cat <<HELP
 CITY — coding agents in Termux via PRoot
-  bash city.sh install <codex|opencode|antigravity|grok|muse|all>
-  bash city.sh update [codex|opencode|antigravity|grok|muse|all]
+  bash city.sh install <agent...|all>
+  bash city.sh update [agent...|all]
   bash city.sh status
-  bash city.sh codex [arguments...]
-  bash city.sh opencode [arguments...]
-  bash city.sh antigravity [arguments...]   (agy)
-  bash city.sh grok [arguments...]          (Grok Build)
-  bash city.sh muse [arguments...]          (Muse Code)
+  bash city.sh <agent> [arguments...]
   bash city.sh --help
+Agents: ${catalog[*]}
 Set CITY_DISTRO=ubuntu (default) or debian for every command.
 Run agents from a project beneath your Termux HOME.
+install creates the distro once and reuses it afterwards.
 update reuses the existing distro and updates installed agents only.
 status reads metadata without installing packages or running agents.
 HELP
 }
 
-# Pin official releases. The optional architecture is needed only at install time.
-agent_info() {
-    agent="$1"
-    binary="$agent"
-    case "$agent" in
-        codex)
-            version=0.154.0
-            url="https://registry.npmjs.org/@openai/codex/-/codex-${version}.tgz"
-            digest=155ff1d4e1d762ffe27e37f79978fd4e14d301671464de9c18845046147190a34e3ee226bb5596d1cf1ebf5bd4904f57187f747449d81b5b418c8931462920d3
-            ;;
-        opencode)
-            version=1.18.31
-            url="https://registry.npmjs.org/opencode-ai/-/opencode-ai-${version}.tgz"
-            digest=27de5f79e7de5b0b486b0de2af1efa5a3cd6720417c66b8798356986fb397a9f57df47c127a4fa6c5870e748bd2b1e74306ff13e7e70da969f5c87cdb5daf2f7
-            ;;
-        antigravity)
-            binary=agy
-            version=1.3.1
-            if [[ "${2:-x64}" == arm64 ]]; then
-                url="https://storage.googleapis.com/antigravity-public/antigravity-cli/$version-4582356770750464/linux-arm/cli_linux_arm64.tar.gz"
-                digest=c41b8cd8c526eb043fa0b019377ab8109190b547624f17f5255868ace79cd8e9195a60ac7b89478101127effbe049341c4108ed0ead4b160968704a8b79d8799
-            else
-                url="https://storage.googleapis.com/antigravity-public/antigravity-cli/$version-4582356770750464/linux-x64/cli_linux_x64.tar.gz"
-                digest=3b8349d72678795baf8788481815e20d7acf3b80f9d2f867a607e712bc6be7fb18fd7d4fcf3aeee4ae593b0f469684c6d3497524f10a4c426a1a2bdec20b1f68
-            fi
-            ;;
-        grok)
-            version=1.0.46
-            url="https://registry.npmjs.org/@xai-official/grok/-/grok-$version.tgz"
-            digest=a973b89b224501008864d8cc25601a2744d35208b65ab4299d862dadd77d850f1361eccf1f4b25487058831a9e765c2070755da818a20d750b1e421d043ce4c9
-            ;;
-        muse)
-            version=1.4.3-R5018.1
-            if [[ "${2:-x64}" == arm64 ]]; then
-                url="https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=$version&file=muse-aarch64-linux"
-                digest=6426c76a0081f20d60f6cad03308a147d79ce45758f1a89fd2713253cf475497
-            else
-                url="https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=$version&file=muse-x86-linux"
-                digest=e671790882bc88d65edb4ae0f713becf378ebf91011034ab75abebe3592dde4f
-            fi
-            ;;
-        *) die "Unsupported agent: $agent" ;;
-    esac
+# Validate agent names before any side effect; "all" must stand alone.
+read_selection() {
+    selection=("$@")
+    [[ ${#selection[@]} != 0 ]] || selection=(all)
+    local item
+    for item in "${selection[@]}"; do
+        if [[ "$item" == all ]]; then
+            [[ ${#selection[@]} == 1 ]] || die 'Use "all" on its own.'
+        else
+            agent_info "$item"
+        fi
+    done
 }
 
 command="${1:---help}"
-catalog=(codex opencode antigravity grok muse)
 case "$command" in
     --help | -h | help) usage; exit 0 ;;
     install)
-        [[ $# == 2 ]] || die 'Usage: bash city.sh install <codex|opencode|antigravity|grok|muse|all>'
-        selection="$2"
-        [[ "$selection" == all ]] || agent_info "$selection"
+        [[ $# -ge 2 ]] || die "Usage: bash city.sh install <agent...|all>. Agents: ${catalog[*]}"
+        shift
+        read_selection "$@"
         ;;
-    update)
-        [[ $# -le 2 ]] || die 'Usage: bash city.sh update [agent|all]'
-        selection="${2:-all}"
-        [[ "$selection" == all ]] || agent_info "$selection"
-        ;;
+    update) shift; read_selection "$@" ;;
     status) [[ $# == 1 ]] || die 'Usage: bash city.sh status' ;;
-    codex | opencode | antigravity | grok | muse) agent_info "$command"; shift ;;
-    *) die "Unknown command: $command" ;;
+    *)
+        # Only catalog names reach agent_info's case; anything else is rejected there.
+        [[ "$command" =~ ^[a-z][a-z0-9-]*$ ]] || die "Unknown command: $command"
+        agent_info "$command"
+        shift
+        ;;
 esac
 
 case "${CITY_DISTRO:-ubuntu}" in
@@ -101,40 +72,44 @@ esac
 [[ "${PREFIX:-}" =~ ^/data/data/com\.termux[^/]*/files/usr/?$ ]] || die 'Run this command inside Termux.'
 PREFIX="${PREFIX%/}"
 distro="city-$distro_id"
-node_version=v22.23.2
+node_version=v22.23.5
 login=(proot-distro login --user root --isolated)
 
 if [[ "$command" == install || "$command" == update || "$command" == status ]]; then
-    script_dir="$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")"
     [[ -r "$script_dir/scripts/guest-install.sh" && -r "$script_dir/scripts/environment.sh" ]] || die 'Missing scripts; keep the CITY checkout together.'
     # shellcheck source=scripts/environment.sh
     source "$script_dir/scripts/environment.sh"
     case "$(dpkg --print-architecture)" in
         aarch64 | arm64)
             arch=arm64
-            node_sha=fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8
+            node_sha=2babb9eb5264860d540849f4b064a6fbdebcdc323657d9d382ce23d313fd5e09
             ;;
         x86_64 | amd64)
             arch=x64
-            node_sha=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
+            node_sha=cdeb8670a0c81f51b4dc4ac61919f9b1ad917b304bf8221eb939570663d240f8
             ;;
         *) die 'Only 64-bit ARM and x86_64 Termux are supported.' ;;
     esac
     rootfs="$PREFIX/var/lib/proot-distro/containers/$distro/rootfs"
     owner="$rootfs/.city-owner"
+    # Present only while CITY itself is creating the distro (see below).
+    pending="$HOME/.local/share/city/creating-$distro"
     inspect_environment
     if [[ "$command" == status ]]; then
         revision="$(git -C "$script_dir" rev-parse --short HEAD 2>/dev/null || printf unknown)"
         printf 'Checkout: %s\nRevision: %s\nDistro: %s\nRootfs: %s\nEnvironment: %s\n%s\n' \
             "$script_dir" "$revision" "$distro" "$rootfs" "$environment_state" "$environment_reason"
         [[ -z "$source_image" ]] || printf 'Original image: %s\n' "$source_image"
+        if [[ "$environment_state" == unmanaged && -f "$pending" ]]; then
+            printf 'An interrupted CITY install left this distro incomplete; install will recreate it.\n'
+        fi
         [[ "$environment_state" != missing ]] || exit 0
         [[ "$environment_state" == managed || "$environment_state" == legacy ]] || exit 2
         status_code=0
-        printf '\n%-14s %-10s %-20s %s\n' Agent State Recorded-version CITY-version
+        printf '\n%-12s %-10s %-24s %s\n' Agent State Recorded-version CITY-version
         for item in "${catalog[@]}"; do
             inspect_agent "$item"
-            printf '%-14s %-10s %-20s %s\n' "$item" "$active_state" "$active_version" "$version"
+            printf '%-12s %-10s %-24s %s\n' "$item" "$active_state" "$active_version" "$version"
             [[ "$active_state" != invalid ]] || status_code=2
         done
         exit "$status_code"
@@ -143,7 +118,7 @@ if [[ "$command" == install || "$command" == update || "$command" == status ]]; 
         require_environment
         select_updates
         [[ ${#agents[@]} != 0 ]] || { printf 'city: no installed agents to update in %s. Use install to add one.\n' "$distro"; exit 0; }
-    elif [[ "$environment_state" != missing ]]; then
+    elif [[ "$environment_state" != missing && ! ( "$environment_state" == unmanaged && -f "$pending" ) ]]; then
         require_environment
     fi
     if [[ "$command" == install ]]; then
@@ -160,6 +135,14 @@ if [[ "$command" == install || "$command" == update || "$command" == status ]]; 
     if [[ "$command" == update ]]; then
         require_environment
         select_updates
+    elif [[ -f "$pending" ]]; then
+        inspect_environment
+        if [[ "$environment_state" == unmanaged ]]; then
+            # Only CITY writes this file, right before it creates the distro, and removes
+            # it once the owner marker exists. So this is our own half-created distro.
+            printf 'city: removing incomplete %s left by an interrupted install.\n' "$distro"
+            proot-distro remove "$distro"
+        fi
     fi
     if [[ ! -e "${rootfs%/rootfs}" && ! -L "${rootfs%/rootfs}" ]]; then
         [[ "$command" == install ]] || die 'update never creates a distro; use install first.'
@@ -169,27 +152,41 @@ if [[ "$command" == install || "$command" == update || "$command" == status ]]; 
         trap 'exit 130' INT
         trap 'exit 143' TERM
         python3 "$script_dir/scripts/fetch-rootfs.py" "$image" "$arch" "$download_dir/rootfs.tar.gz"
+        : >"$pending"
         proot-distro install --name "$distro" "$download_dir/rootfs.tar.gz"
         [[ -d "$rootfs" && ! -L "$rootfs" ]] || die 'PRoot-Distro did not create the expected rootfs.'
         printf '%s\n' "$image" >"$owner"
+        rm -f -- "$pending"
         rm -rf -- "$download_dir"
         trap - EXIT INT TERM
     else
         printf 'city: reusing existing %s at %s\n' "$distro" "$rootfs"
     fi
     require_environment
+    rm -f -- "$pending"
     record_environment
     if [[ "$command" == install ]]; then
-        agents=("$selection")
-        [[ "$selection" != all ]] || agents=("${catalog[@]}")
+        agents=("${selection[@]}")
+        [[ "${selection[0]}" != all ]] || agents=("${catalog[@]}")
     fi
+    # Refresh guest packages once per run; keep going if one agent fails.
+    refresh_apt=1 failed=()
     for item in "${agents[@]}"; do
         agent_info "$item" "$arch"
-        "${login[@]}" "$distro" -- /bin/bash -s -- \
-            "$agent" "$version" "$url" "$digest" "$node_version" "$arch" "$node_sha" \
-            <"$script_dir/scripts/guest-install.sh"
+        expected="$version"
+        # Success means the guest exited 0 AND the host now sees the pinned release active.
+        if "${login[@]}" "$distro" -- /bin/bash -s -- "$refresh_apt" \
+            "$agent" "$binary" "$format" "$checksum" "$version" "$url" "$digest" "$member" \
+            "$node_version" "$arch" "$node_sha" <"$script_dir/scripts/guest-install.sh" &&
+            inspect_agent "$item" && [[ "$active_state" == managed && "$active_version" == "$expected" ]]; then
+            refresh_apt=0
+        else
+            failed+=("$item")
+            printf 'city: %s was not changed; its previous version (if any) stays active.\n' "$item" >&2
+        fi
     done
-    printf 'city: %s complete in %s. Run: bash city.sh <codex|opencode|antigravity|grok|muse>\n' "$command" "$distro"
+    [[ ${#failed[@]} == 0 ]] || die "$command failed for: ${failed[*]}. Other agents completed in $distro."
+    printf 'city: %s complete in %s. Run: bash city.sh <agent>\n' "$command" "$distro"
     exit 0
 fi
 
@@ -200,14 +197,36 @@ case "$cwd" in
     "$host_home" | "$host_home/"*) guest_cwd="/root${cwd#"$host_home"}" ;;
     *) die 'Run from a directory beneath Termux HOME; shared storage is not mounted.' ;;
 esac
+agent_paths="$(printf '/opt/city/%s/bin:' "${catalog[@]}")"
 # Foreground exec preserves terminal, stdin and exit status. PRoot owns child cleanup.
+# Each agent runs with the Node it was verified with (.city-node), so a newer CITY
+# checkout with a newer Node pin never breaks agents installed before "update".
 # shellcheck disable=SC2016 # Expansion happens in the guest shell.
 exec "${login[@]}" --shared-home "$distro" -- /bin/bash --noprofile --norc -c '
     set -eu
-    export PATH="/opt/city/node-$1/bin:/opt/city/codex/bin:/opt/city/opencode/bin:/opt/city/antigravity/bin:/opt/city/grok/bin:/opt/city/muse/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    node="$1" agent="$3" binary="$4"
+    root="${binary%/bin/*}"
+    if [ -f "$root/.city-node" ]; then
+        recorded="$(cat "$root/.city-node")"
+        case "$recorded" in v[0-9]*.[0-9]*.[0-9]*) node="$recorded" ;; esac
+    fi
+    node_bin="/opt/city/node-$node/bin"
+    if [ ! -x "$node_bin/node" ]; then
+        for candidate in /opt/city/node-v*/bin; do
+            if [ -x "$candidate/node" ]; then node_bin="$candidate"; fi
+        done
+    fi
+    export PATH="$root/bin:$node_bin:$5/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    export LANG="${LANG:-C.UTF-8}"
+    # CITY pins and verifies releases; built-in self-updaters would bypass that.
+    # Names and values as read by each release (Claude, Cline and CodeBuddy share the first).
+    export DISABLE_AUTOUPDATER=1 OPENCODE_DISABLE_AUTOUPDATE=1 GROK_DISABLE_AUTOUPDATER=1 \
+        COPILOT_AUTO_UPDATE=false AMP_SKIP_UPDATE_CHECK=1 CLINE_NO_AUTO_UPDATE=1 \
+        AUGMENT_DISABLE_AUTO_UPDATE=1 QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=true
+    # Optional KEY=value lines (API keys etc.) from Termux ~/.config/city/env.
+    if [ -f /root/.config/city/env ]; then set -a; . /root/.config/city/env; set +a; fi
     cd -- "$2" || exit 2
-    binary="$3"
-    shift 3
-    test -x "$binary" || { echo "city: agent missing; run install first." >&2; exit 2; }
+    shift 5
+    test -x "$binary" || { echo "city: $agent is not installed; run: bash city.sh install $agent" >&2; exit 2; }
     exec "$binary" "$@"
-' city "$node_version" "$guest_cwd" "/opt/city/$agent/bin/$binary" "$@"
+' city "$node_version" "$guest_cwd" "$agent" "/opt/city/$agent/bin/$binary" "$agent_paths" "$@"

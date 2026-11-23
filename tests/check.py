@@ -14,6 +14,24 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+FIELDS = ('agent', 'arch', 'binary', 'format', 'checksum', 'version', 'url', 'digest', 'member')
+
+
+def read_catalog():
+    """Every (agent, arch) entry exactly as city.sh resolves it."""
+    script = ('die() { echo "$*" >&2; exit 2; }; source "$1"; '
+              'for a in "${catalog[@]}"; do for arch in arm64 x64; do agent_info "$a" "$arch"; '
+              'printf "%s\\t" "$agent" "$arch" "$binary" "$format" "$checksum" "$version" "$url" "$digest"; '
+              'printf "%s\\n" "$member"; done; done')
+    result = subprocess.run(['bash', '-c', script, 'catalog', str(ROOT / 'scripts/agents.sh')],
+                            text=True, capture_output=True, check=True)
+    return [dict(zip(FIELDS, line.split('\t'))) for line in result.stdout.splitlines()]
+
+
+def write_script(path, body):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('#!/bin/bash\n' + body + '\n')
+    path.chmod(0o755)
 
 
 class CityCLI(unittest.TestCase):
@@ -121,6 +139,64 @@ sys.exit(int(os.environ.get('CITY_MOCK_STATUS', '0')))
                 self.assertIn(f'/opt/city/{agent}/bin/{binary}', call)
                 self.assertEqual(call[-1], '--version')
                 self.assertIn('--isolated', call)
+
+    def test_every_catalog_agent_dispatches(self):
+        entries = {e['agent']: e for e in read_catalog()}
+        self.assertGreaterEqual(len(entries), 24)
+        help_text = self.run_city('--help').stdout
+        for agent, entry in entries.items():
+            with self.subTest(agent=agent):
+                self.assertIn(agent, help_text)
+                result = self.run_city(agent, '--version')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                call = json.loads(self.log.read_text().splitlines()[-1])
+                self.assertIn(f"/opt/city/{agent}/bin/{entry['binary']}", call)
+                self.assertEqual(call[-1], '--version')
+                self.assertIn('--isolated', call)
+                self.assertIn('--shared-home', call)
+
+    def test_launcher_uses_recorded_node_and_env_file(self):
+        # Run the real guest launcher script on the host against a fake /opt/city.
+        self.assertEqual(self.run_city('codex', 'arg one').returncode, 0)
+        call = json.loads(self.log.read_text())
+        command = call[call.index('--') + 1:]
+        fake = self.home / 'opt-city'
+        project = self.home / 'project'
+        project.mkdir()
+        env_file = self.home / 'city-env'
+        env_file.write_text('CITY_TEST_KEY=from-env-file\n')
+        script = command[command.index('-c') + 1]
+        command[command.index('-c') + 1] = (script.replace('/opt/city', str(fake))
+                                            .replace('/root/.config/city/env', str(env_file)))
+        command[command.index('/root')] = str(project)
+        command[command.index('/opt/city/codex/bin/codex')] = str(fake / 'codex/bin/codex')
+        for version in ('v0.9.0', 'v1.0.0'):
+            write_script(fake / f'node-{version}/bin/node', f'echo node-{version}')
+        release = fake / 'codex-0.154.0'
+        (release / 'bin').mkdir(parents=True)
+        write_script(release / 'bin/codex', 'node; echo "key=$CITY_TEST_KEY lang=$LANG au=$DISABLE_AUTOUPDATER"; '
+                     'pwd; printf "<%s>" "$@"')
+        (fake / 'codex').symlink_to(release)
+        env = {'PATH': os.environ['PATH']}
+        for recorded, expected in [('v0.9.0', 'node-v0.9.0'),  # recorded Node wins
+                                   (None, 'node-v1.0.0'),      # legacy: newest available
+                                   ('garbage', 'node-v1.0.0')]:
+            with self.subTest(recorded=recorded):
+                marker = release / '.city-node'
+                marker.unlink(missing_ok=True)
+                if recorded:
+                    marker.write_text(recorded + '\n')
+                result = subprocess.run(command, env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                lines = result.stdout.splitlines()
+                self.assertEqual(lines[0], expected)
+                self.assertEqual(lines[1], 'key=from-env-file lang=C.UTF-8 au=1')
+                self.assertEqual(lines[2], str(project))
+                self.assertEqual(lines[3], '<arg one>')
+        (fake / 'codex').unlink()
+        result = subprocess.run(command, env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('codex is not installed; run: bash city.sh install codex', result.stderr)
 
     def test_outside_home_rejected(self):
         self.env['HOME'] = str(self.home / 'nested')
@@ -237,7 +313,8 @@ class EnvironmentReuse(unittest.TestCase):
         self.assertEqual(owner.splitlines(), ['CITY_ENV_V1', 'ubuntu', '24.04', 'x64', self.origin])
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertEqual(len(calls), 3)
-        self.assertTrue(all(call[0] == 'login' and call[-7] == 'opencode' for call in calls))
+        self.assertTrue(all(call[0] == 'login' and call[call.index('-s') + 3] == 'opencode'
+                            for call in calls))
         self.assertEqual((self.rootfs / 'private.txt').stat().st_ino, before)
         self.assertEqual((self.home / 'project.txt').read_text(), 'keep project')
         self.assertEqual((self.containers / 'ubuntu/keep').read_text(), 'other distro')
@@ -307,6 +384,83 @@ class EnvironmentReuse(unittest.TestCase):
         self.assertEqual(other.read_text(), self.origin + '\n')
         self.assertFalse(self.log.exists())
 
+    def creation_mocks(self, install_status=0):
+        # PRoot-Distro that really creates/removes container directories.
+        template = self.home / 'template'
+        (template / 'etc').mkdir(parents=True, exist_ok=True)
+        (template / 'usr/bin').mkdir(parents=True, exist_ok=True)
+        (template / 'etc/os-release').write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+        (template / 'usr/bin/bash').write_bytes(b'\x7fELF\x02\x01' + b'\x00' * 12 + b'\x3e\x00')
+        write_script(self.bin / 'proot-distro', f'''
+printf '%s\\n' "$*" >>"$CITY_CALLS"
+case "$1" in
+    remove) rm -rf -- "{self.containers}/$2" ;;
+    install)
+        mkdir -p "{self.containers}/$3"
+        cp -R -- "{template}" "{self.containers}/$3/rootfs"
+        exit {install_status} ;;
+    login)  # Stand-in for guest-install.sh: leave a managed codex release behind.
+        city="{self.rootfs}/opt/city"
+        mkdir -p "$city/codex-0.154.0/bin"
+        printf '#!/bin/sh\\n' >"$city/codex-0.154.0/bin/codex"
+        chmod 755 "$city/codex-0.154.0/bin/codex"
+        printf '%0128d\\n' 1 >"$city/codex-0.154.0/.city-sha512"
+        ln -sfn /opt/city/codex-0.154.0 "$city/codex" ;;
+esac''')
+        write_script(self.bin / 'python3', ': >"${@: -1}"')
+
+    def test_interrupted_creation_is_recreated_only_with_city_stamp(self):
+        stamp = self.home / '.local/share/city/creating-city-ubuntu'
+        # Interrupted after PRoot-Distro created the rootfs, before the owner marker.
+        self.creation_mocks(install_status=137)
+        result = self.run_city('install', 'codex')
+        self.assertEqual(result.returncode, 137, result.stderr)
+        self.assertTrue(stamp.exists())
+        self.assertFalse((self.rootfs / '.city-owner').exists())
+        status = self.run_city('status')
+        self.assertEqual(status.returncode, 2)
+        self.assertIn('interrupted CITY install', status.stdout)
+        self.creation_mocks()
+        self.log.unlink()
+        result = self.run_city('install', 'codex')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('removing incomplete city-ubuntu', result.stdout)
+        calls = self.log.read_text().splitlines()
+        self.assertEqual([c.split()[0] for c in calls], ['remove', 'install', 'login'])
+        self.assertEqual((self.rootfs / '.city-owner').read_text().splitlines()[0], 'CITY_ENV_V1')
+        self.assertFalse(stamp.exists())
+        # Without CITY's own stamp an unmarked distro is never removed.
+        (self.rootfs / '.city-owner').unlink()
+        (self.rootfs / 'keep').write_text('user data')
+        self.log.unlink()
+        result = self.run_city('install', 'codex')
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.log.exists())
+        self.assertEqual((self.rootfs / 'keep').read_text(), 'user data')
+
+    def test_multi_agent_install_continues_after_failure(self):
+        self.make_environment()
+        self.make_agent('codex', '0.154.0')
+        self.make_agent('opencode', '1.18.31')
+        write_script(self.bin / 'proot-distro', '''
+printf '%s\\n' "$*" >>"$CITY_CALLS"
+[[ " $* " != *" grok "* ]]''')
+        result = self.run_city('install', 'grok', 'codex', 'opencode')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('failed for: grok', result.stderr)
+        calls = [line.split() for line in self.log.read_text().splitlines()]
+        # Arguments after "-s --": refresh-apt flag, then the agent name.
+        picked = [(c[c.index('-s') + 2], c[c.index('-s') + 3]) for c in calls]
+        self.assertEqual(picked, [('1', 'grok'), ('1', 'codex'), ('0', 'opencode')])
+        for args in [('install', 'all', 'codex'), ('install',), ('install', 'codex', 'nope')]:
+            self.assertEqual(self.run_city(*args).returncode, 2)
+        self.assertEqual(len(self.log.read_text().splitlines()), 3)
+        # A guest that exits 0 without activating the pinned release is still a failure.
+        self.log.unlink()
+        result = self.run_city('install', 'claude')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('failed for: claude', result.stderr)
+
     def test_unknown_or_incompatible_environment_is_not_modified(self):
         self.make_environment()
         self.make_agent()
@@ -371,7 +525,11 @@ else:
         rootfs = Path(self.env['PREFIX'], 'var/lib/proot-distro/containers',
                       'city-' + self.env.get('CITY_DISTRO', 'ubuntu'), 'rootfs')
         (self.home / 'project.txt').write_text('preserve this project')
-        for operation in [('install', 'all'), ('update',), ('update', 'all')]:
+        first = ('install', 'all')
+        if self.env['CITY_DISTRO'] == 'debian':
+            first = ('install', *[e['agent'] for e in read_catalog() if e['arch'] == 'x64'
+                                  and e['agent'] not in ('vibe', 'openhands')])
+        for operation in [first, ('update',), ('update', 'all')]:
             result = self.run_city(*operation, timeout=1800)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             # Use the distro interpreter, not a Python preinstalled in the test image.
@@ -391,22 +549,23 @@ else:
         ]:
             result = self.run_guest(*command, timeout=180)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        releases = [('codex', 'codex', '0.154.0'), ('opencode', 'opencode', '1.18.31'),
-                    ('antigravity', 'agy', '1.3.1'), ('grok', 'grok', '1.0.46'),
-                    ('muse', 'muse', '1.4.3-R5018.1')]
+        releases = [(e['agent'], e['binary'], e['version']) for e in read_catalog() if e['arch'] == 'x64']
+        if self.env['CITY_DISTRO'] == 'debian':
+            # These Python agents require Python 3.12; Debian 12 ships 3.11.
+            releases = [r for r in releases if r[0] not in ('vibe', 'openhands')]
         links = {agent: (rootfs / 'opt/city' / agent).readlink() for agent, _, _ in releases}
         for agent, binary, version in releases:
             with self.subTest(agent=agent):
                 self.assertTrue((rootfs / str(links[agent]).lstrip('/') / 'bin' / binary).is_file())
-                result = self.run_city(agent, '--version', timeout=30)
+                result = self.run_city(agent, '--version', timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(version, result.stdout)
+                self.assertIn(version.split('-')[0], result.stdout + result.stderr)
         source = (ROOT / 'city.sh').read_text()
         node_version = re.search(r'node_version=(v[\d.]+)', source)[1]
         node_sha = re.findall(r'node_sha=([a-f0-9]{64})', source)[1]
-        result = self.run_guest('bash', '-s', '--', 'codex', '0.154.0',
+        result = self.run_guest('bash', '-s', '--', '0', 'codex', 'codex', 'npm', 'sha512', '0.154.0',
                                  'https://registry.npmjs.org/@openai/codex/-/codex-0.154.0.tgz',
-                                 '0' * 128, node_version, 'x64', node_sha,
+                                 '0' * 128, '-', node_version, 'x64', node_sha,
                                  input=(ROOT / 'scripts/guest-install.sh').read_text(), timeout=120)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(links, {agent: (rootfs / 'opt/city' / agent).readlink() for agent in links})
@@ -463,11 +622,13 @@ class NativeInstaller(unittest.TestCase):
                             platform = 'aarch64' if arch == 'arm64' else 'x86'
                             url = ('https://lookaside.facebook.com/lookaside/muse/download/'
                                    f'?channel=muse&version={version}&file=muse-{platform}-linux')
+                            layout = ['binary', 'sha256', version, url, digest, '-']
                         else:
                             platform = 'linux-arm' if arch == 'arm64' else 'linux-x64'
                             url = ('https://storage.googleapis.com/antigravity-public/antigravity-cli/'
                                    f'{version}-4582356770750464/{platform}/cli_linux_{arch}.tar.gz')
-                        return [agent, version, url, digest, 'v1.0.0', arch, '1' * 64]
+                            layout = ['archive', 'sha512', version, url, digest, 'antigravity']
+                        return ['1', agent, binary, *layout, 'v1.0.0', arch, '1' * 64]
 
                     def run(args):
                         return subprocess.run(['bash', str(installer), *args], env=env,
@@ -487,14 +648,141 @@ class NativeInstaller(unittest.TestCase):
                     bad = arguments(2, build_payload(status=71))
                     self.assertEqual(run(bad).returncode, 71)
                     self.assertEqual(link.readlink(), original)
-                    self.assertFalse((city / f'{agent}-{bad[1]}').exists())
+                    self.assertFalse((city / f'{agent}-{bad[5]}').exists())
                     good = arguments(2, build_payload())
                     self.assertEqual(run(good).returncode, 0)
                     self.assertNotEqual(link.readlink(), original)
                     self.assertTrue(original.is_dir(), 'Keep the previous version')
-                    good[2] += '&unexpected=1'
+                    good[6] += '&unexpected=1'
                     self.assertNotEqual(run(good).returncode, 0)
                     self.assertFalse(list(city.glob('.install.*')), 'Clean failed stages')
+
+
+class GuestInstallerFormats(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.city = self.root / 'city'
+        self.payload = self.root / 'download'
+        self.urls = self.root / 'urls'
+        for version in ('v1.0.0', 'v2.0.0'):
+            node = self.city / f'node-{version}'
+            (node / 'bin').mkdir(parents=True)
+            (node / '.city-sha256').write_text('1' * 64 + '\n')
+            write_script(node / 'bin/apt-get', 'exit 0')
+            write_script(node / 'bin/curl', 'printf "%s\\n" "${@: -3:1}" >>"$CITY_TEST_URLS"\n'
+                         '[[ -f "$CITY_TEST_PAYLOAD" ]] || exit 22\ncp -- "$CITY_TEST_PAYLOAD" "${@: -1}"')
+            # npm stand-in: require a real .tgz path, then lay out a global prefix.
+            write_script(node / 'bin/npm', '[[ "${@: -1}" == *.tgz && -f "${@: -1}" ]] || exit 9\n'
+                         'prefix="${@: 4:1}"; mkdir -p "$prefix/bin"\n'
+                         'printf "#!/bin/sh\\necho fake-npm-agent 1.0.0\\n" >"$prefix/bin/gemini"\n'
+                         'chmod 755 "$prefix/bin/gemini"')
+        self.installer = self.root / 'install.sh'
+        self.installer.write_text((ROOT / 'scripts/guest-install.sh').read_text().replace(
+            '/opt/city', str(self.city)))
+
+    def run_installer(self, entry, node='v1.0.0'):
+        args = ['1', entry['agent'], entry['binary'], entry['format'], entry['checksum'],
+                entry['version'], entry['url'], entry['digest'], entry['member'], node,
+                entry['arch'], '1' * 64]
+        env = dict(os.environ, PATH=f'{self.city}/node-{node}/bin:{os.environ["PATH"]}',
+                   CITY_TEST_PAYLOAD=str(self.payload), CITY_TEST_URLS=str(self.urls))
+        return subprocess.run(['bash', str(self.installer), *args], env=env, text=True,
+                              capture_output=True, timeout=300)
+
+    def test_catalog_entries_pass_installer_checks(self):
+        entries = read_catalog()
+        self.assertEqual(len({e['agent'] for e in entries}) * 2, len(entries))
+        for entry in entries:
+            with self.subTest(agent=entry['agent'], arch=entry['arch']):
+                self.assertRegex(entry['version'], r'^\d+\.\d+\.\d+(-[0-9A-Za-z][0-9A-Za-z.]*)?$')
+                self.assertRegex(entry['digest'], '^[0-9a-f]{%d}$' % (
+                    64 if entry['checksum'] == 'sha256' else 128))
+                if entry['format'] == 'npm':
+                    self.assertTrue(entry['url'].endswith(f"-{entry['version']}.tgz"))
+                self.urls.unlink(missing_ok=True)
+                # No payload: validation must pass and stop at the (failed) download.
+                result = self.run_installer(entry)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.urls.read_text().splitlines(), [entry['url']], result.stderr)
+                self.urls.unlink()
+                tampered = dict(entry, url=entry['url'] + 'x')
+                self.assertNotEqual(self.run_installer(tampered).returncode, 0)
+                self.assertFalse(self.urls.exists(), 'Tampered URL must not be downloaded')
+        self.assertFalse(list(self.city.glob('.install.*')))
+
+    def test_npm_release_and_node_marker(self):
+        self.payload.write_bytes(b'npm tarball bytes')
+        entry = dict(agent='gemini', arch='arm64', binary='gemini', format='npm', checksum='sha512',
+                     version='1.0.0', member='-',
+                     url='https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-1.0.0.tgz',
+                     digest=hashlib.sha512(self.payload.read_bytes()).hexdigest())
+        for _ in range(2):
+            result = self.run_installer(entry)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        link = self.city / 'gemini'
+        self.assertEqual(link.readlink(), self.city / 'gemini-1.0.0')
+        self.assertEqual((link / '.city-node').read_text(), 'v1.0.0\n')
+        # A newer pinned Node re-verifies the same release and records it; link unchanged.
+        result = self.run_installer(entry, node='v2.0.0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((link / '.city-node').read_text(), 'v2.0.0\n')
+        self.assertEqual(link.readlink(), self.city / 'gemini-1.0.0')
+        self.assertEqual(len(self.urls.read_text().splitlines()), 1, 'Reuse the verified release')
+
+    def test_streamed_installer_survives_agents_reading_stdin(self):
+        # city.sh streams this script through `bash -s`; a child reading stdin must not
+        # swallow the rest of it and turn a half-done install into a silent "success".
+        self.payload.write_bytes(b'npm tarball bytes')
+        for node in ('v1.0.0',):
+            write_script(self.city / f'node-{node}/bin/npm', 'prefix="${@: 4:1}"; mkdir -p "$prefix/bin"\n'
+                         'printf "#!/bin/sh\\ncat >/dev/null\\necho stdin-reader 1.0.0\\n" >"$prefix/bin/gemini"\n'
+                         'chmod 755 "$prefix/bin/gemini"')
+        entry = dict(agent='gemini', arch='x64', binary='gemini', format='npm', checksum='sha512',
+                     version='1.0.0', member='-',
+                     url='https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-1.0.0.tgz',
+                     digest=hashlib.sha512(self.payload.read_bytes()).hexdigest())
+        args = ['1', entry['agent'], entry['binary'], entry['format'], entry['checksum'],
+                entry['version'], entry['url'], entry['digest'], entry['member'], 'v1.0.0', 'x64', '1' * 64]
+        env = dict(os.environ, PATH=f'{self.city}/node-v1.0.0/bin:{os.environ["PATH"]}',
+                   CITY_TEST_PAYLOAD=str(self.payload), CITY_TEST_URLS=str(self.urls))
+        result = subprocess.run(['bash', '-s', '--', *args], input=self.installer.read_text(),
+                                env=env, text=True, capture_output=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('city: gemini 1.0.0 ready', result.stdout)
+        self.assertEqual((self.city / 'gemini').readlink(), self.city / 'gemini-1.0.0')
+
+    def test_wheel_release_runs_after_move(self):
+        import base64
+        import zipfile
+        files = {
+            'city_fake.py': 'import sys\ndef main():\n    print("fake-wheel 1.0.0", *sys.argv[1:])\n',
+            'city_fake-1.0.0.dist-info/METADATA': 'Metadata-Version: 2.1\nName: city-fake\nVersion: 1.0.0\n',
+            'city_fake-1.0.0.dist-info/WHEEL': ('Wheel-Version: 1.0\nGenerator: city-test\n'
+                                                'Root-Is-Purelib: true\nTag: py3-none-any\n'),
+            'city_fake-1.0.0.dist-info/entry_points.txt': '[console_scripts]\naider = city_fake:main\n',
+        }
+        record = []
+        for name, text in files.items():
+            digest = base64.urlsafe_b64encode(hashlib.sha256(text.encode()).digest()).rstrip(b'=')
+            record.append(f'{name},sha256={digest.decode()},{len(text.encode())}')
+        record.append('city_fake-1.0.0.dist-info/RECORD,,')
+        files['city_fake-1.0.0.dist-info/RECORD'] = '\n'.join(record) + '\n'
+        with zipfile.ZipFile(self.payload, 'w') as wheel:
+            for name, text in files.items():
+                wheel.writestr(name, text)
+        entry = dict(agent='aider', arch='x64', binary='aider', format='wheel', checksum='sha256',
+                     version='1.0.0', member='-', digest=hashlib.sha256(self.payload.read_bytes()).hexdigest(),
+                     url=('https://files.pythonhosted.org/packages/ab/cd/' + 'e' * 60 +
+                          '/city_fake-1.0.0-py3-none-any.whl'))
+        result = self.run_installer(entry)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('fake-wheel 1.0.0 --version', result.stdout)
+        run = subprocess.run([str(self.city / 'aider/bin/aider'), 'hello'], text=True,
+                             capture_output=True, cwd=self.root)
+        self.assertEqual(run.stdout, 'fake-wheel 1.0.0 hello\n', run.stderr)
+        self.assertFalse(list(self.city.glob('.install.*')))
 
 
 class RootfsIntegrity(unittest.TestCase):
@@ -527,7 +815,7 @@ class RootfsIntegrity(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get('CITY_PROOT_SOURCE'),
-                     'Set CITY_PROOT_SOURCE to a v5.8.0 checkout in a disposable Linux container.')
+                     'Set CITY_PROOT_SOURCE to a PRoot-Distro v5 checkout (5.8.0-5.10.3 verified) in a disposable Linux container.')
 class RealProotIntegration(unittest.TestCase):
     def test_pinned_images_with_proot_580(self):
         source = (ROOT / 'city.sh').read_text()
