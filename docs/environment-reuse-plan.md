@@ -14,6 +14,26 @@
 - 자동 삭제나 임의 컨테이너 인수 기능은 추가하지 않았다. 별도 `ubuntu`는 계속 독립 환경으로 남긴다.
 - 검증: 기본 검사 20개와 ShellCheck·Bash 구문 통과. Ubuntu 24.04/ Debian 12 x64의 실제 rootfs와 Termux PRoot에서 설치·두 차례 업데이트·다섯 CLI 실행·Python/venv·무결성 실패 시 링크 보존을 확인했고, distro 생성은 각각 한 번이었다. Android 기기 검증은 별도로 남아 있다.
 
+## 2026-11-23 점검: 지원 도구 확대와 "한 번 설치 후 재사용" 검증
+
+PRoot-Distro 최신 소스(5.10.3)를 Termux 모드로 실행하는 하네스에서 실제 Ubuntu 24.04 rootfs로 설치·실행·업데이트를 반복해 확인했다(x86_64, upstream proot의 statx 미지원 때문에 proot 대신 chroot 기반 테스트 shim 사용). 5.10.3에서도 저장 경로(`$PREFIX/var/lib/proot-distro/containers/<name>/rootfs`)와 `login --user/--isolated/--shared-home`, 로컬 아카이브 `install --name`은 CITY의 가정과 같다.
+
+발견해 수정한 재설치 유발 요인:
+
+| 문제 | 수정 전 증상 | 수정 |
+| --- | --- | --- |
+| Node 고정 버전 변경 | 새 체크아웃을 `git pull`만 하면 npm 기반 에이전트가 `node: No such file or directory`(127)로 실행 불가 | 에이전트별 `.city-node` 기록, 런처가 그 Node를 사용. 기록 없는 이전 설치본은 배포판에 있는 Node로 자동 대체. `update`가 새 Node로 기동 확인 후 기록 갱신 |
+| 배포판 생성 중단 | 표식 없는 반쯤 만든 배포판을 `unmanaged`로 영구 거부, 수동 `proot-distro remove` 필요 | 생성 직전 `~/.local/share/city/creating-<distro>` 기록, 표식 기록 후 삭제. 이 기록이 있을 때만 다음 `install`이 지우고 재생성 |
+| 설치 스크립트 stdin 소모 | `bash -s`로 전달하던 설치 스크립트를 에이전트의 `--version`(gemini 등)이 읽어 버려, 링크 전환 전에 종료 코드 0으로 "성공" 처리 | 스크립트 전체를 함수로 먼저 파싱 후 stdin을 `/dev/null`로 실행. 호스트도 설치 후 활성 버전을 다시 검사해 일치할 때만 성공 |
+| 에이전트 자체 업데이트 | 일부 도구가 실행 중 스스로 다른 버전을 설치 | 각 배포물에서 확인한 자동 업데이트 비활성 변수를 런처에서 설정 |
+
+검증 결과:
+
+- 이전 코드로 설치한 codex가 새 체크아웃(Node v22.23.5 고정)에서 `update` 전에도 실행되고, `update` 후 기록이 v22.23.5로 바뀌었다.
+- 23개 도구를 설치해 런처로 모두 기동 확인했다(Muse는 이 검증 환경에서 배포 서버 접근이 차단되어 제외). 이어서 `update`를 다시 실행하면 다운로드 0건, 활성 링크 변화 없음, 배포판 1개 유지.
+- Debian 이미지로 생성 직후 강제 종료를 흉내 내면 이전 코드는 거부, 새 코드는 자동 재생성 후 `managed`가 된다.
+- arm64 실기기 실행, Debian 패키지 설치(이 환경에서 미러 차단)는 확인하지 못했다. arm64용 의존성은 npm/PyPI 메타데이터로 linux-arm64(glibc) 빌드 존재만 확인했다.
+
 아래는 조사 당시의 설계 근거다. 최신 사용자 실행 절차와 검증 결과는 [README](../README.md)를 따른다.
 
 ## 확인한 구조

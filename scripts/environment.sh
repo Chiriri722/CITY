@@ -73,28 +73,27 @@ record_environment() {
 inspect_agent() {
     agent_info "$1"
     active_state=absent active_version='-'
-    local link target pattern receipt receipt_file executable target_real
+    local link target receipt receipt_file executable target_real
     link="$rootfs/opt/city/$agent"
     [[ -e "$link" || -L "$link" ]] || return 0
     active_state=invalid
     [[ -L "$link" ]] || return 0
     target="$(readlink -- "$link")"
-    pattern='[0-9]+\.[0-9]+\.[0-9]+'
-    [[ "$agent" != muse ]] || pattern+='-R[0-9]+(\.[0-9]+)?'
-    [[ "$target" =~ ^/opt/city/$agent-($pattern)$ ]] || return 0
+    [[ "$target" =~ ^/opt/city/$agent-($version_pattern)$ ]] || return 0
     active_version="${BASH_REMATCH[1]}"
     [[ -d "$rootfs$target" && ! -L "$rootfs$target" ]] || return 0
     target_real="$(realpath -e -- "$rootfs$target")"
     [[ "$target_real" == "$root_real/opt/city/$agent-$active_version" ]] || return 0
-    receipt=.city-sha512
-    [[ "$agent" != muse ]] || receipt=.city-sha256
+    # The receipt type is a property of the installed release, not of today's pin.
+    for receipt in .city-sha512 .city-sha256; do
+        [[ -e "$rootfs$target/$receipt" || -L "$rootfs$target/$receipt" ]] && break
+    done
     [[ ! -L "$rootfs$target/$receipt" ]] || return 0
     receipt_file="$(root_file "$rootfs$target/$receipt")" || return 0
-    receipt="$(cat -- "$receipt_file")"
-    if [[ "$agent" == muse ]]; then
-        [[ "$receipt" =~ ^[0-9a-f]{64}$ ]] || return 0
+    if [[ "$receipt" == .city-sha256 ]]; then
+        [[ "$(cat -- "$receipt_file")" =~ ^[0-9a-f]{64}$ ]] || return 0
     else
-        [[ "$receipt" =~ ^[0-9a-f]{128}$ ]] || return 0
+        [[ "$(cat -- "$receipt_file")" =~ ^[0-9a-f]{128}$ ]] || return 0
     fi
     executable="$(root_file "$rootfs$target/bin/$binary")" || return 0
     [[ -x "$executable" ]] || return 0
@@ -104,14 +103,14 @@ inspect_agent() {
 select_updates() {
     agents=()
     local item candidates
-    candidates=("$selection")
-    [[ "$selection" != all ]] || candidates=("${catalog[@]}")
+    candidates=("${selection[@]}")
+    [[ "${selection[0]}" != all ]] || candidates=("${catalog[@]}")
     for item in "${candidates[@]}"; do
         inspect_agent "$item"
         case "$active_state" in
             managed) agents+=("$item") ;;
             invalid) die "Invalid CITY installation for $item; inspect it before updating." ;;
-            absent) [[ "$selection" == all ]] || die "$item is not installed. Run: bash city.sh install $item" ;;
+            absent) [[ "${selection[0]}" == all ]] || die "$item is not installed. Run: bash city.sh install $item" ;;
         esac
     done
 }
